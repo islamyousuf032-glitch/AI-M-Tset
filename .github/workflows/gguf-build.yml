@@ -1,0 +1,285 @@
+name: GGUF Factory
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_filter:
+        description: "শুধু এই নাম মিলে এমন মডেল বানাবে (খালি = সব)"
+        required: false
+        default: ""
+        type: string
+      quant_override:
+        description: "models.yaml উপেক্ষা করে এই quant-গুলো বানাবে, যেমন Q4_K_M,Q6_K"
+        required: false
+        default: ""
+        type: string
+      llama_cpp_ref:
+        description: "llama.cpp ভার্সন (master / b6000 / ট্যাগ)"
+        required: false
+        default: "master"
+        type: string
+      create_release:
+        description: "Release তৈরি করবে?"
+        required: false
+        default: true
+        type: boolean
+  push:
+    branches: [main]
+    paths:
+      - "models.yaml"
+      - ".github/workflows/gguf-build.yml"
+      - "scripts/**"
+
+permissions:
+  contents: write
+
+jobs:
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps for matrix generation
+        run: pip install pyyaml
+
+      - name: Generate matrix from models.yaml
+        id: mk
+        env:
+          MODEL_FILTER: ${{ inputs.model_filter }}
+          QUANT_OVERRIDE: ${{ inputs.quant_override }}
+        run: |
+          python3 - << 'PY'
+          import yaml, json, os
+
+          with open("models.yaml", "r", encoding="utf-8") as f:
+              data = yaml.safe_load(f)
+
+          model_filter = os.environ.get("MODEL_FILTER", "").strip()
+          quant_override = os.environ.get("QUANT_OVERRIDE", "").strip()
+
+          matrix = []
+          for m in data.get("models", []):
+              name = m["name"]
+              repo = m["repo"]
+              quants = m.get("quants", ["Q4_K_M"])
+              prompt = m.get("test_prompt", "Hello")
+
+              if model_filter and model_filter.lower() not in name.lower():
+                  continue
+
+              if quant_override:
+                  quants = [q.strip() for q in quant_override.split(",") if q.strip()]
+
+              for q in quants:
+                  matrix.append({
+                      "name": name,
+                      "repo": repo,
+                      "quant": q,
+                      "test_prompt": prompt
+                  })
+
+          if not matrix:
+              print("::warning::models.yaml থেকে কোনো job পাওয়া যায়নি — filter/quants চেক করুন")
+
+          # GitHub Actions matrix requires include
+          out = {"include": matrix}
+          print(json.dumps(out, indent=2, ensure_ascii=False))
+
+          # Write to GITHUB_OUTPUT (escape)
+          import pathlib
+          out_json = json.dumps(out, ensure_ascii=False)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as gh:
+              gh.write(f"matrix={out_json}\n")
+          PY
+
+  build:
+    needs: prepare-matrix
+    if: ${{ fromJson(needs.prepare-matrix.outputs.matrix).include[0] != null }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    name: ${{ matrix.name }} · ${{ matrix.quant }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space (বড় মডেলের জন্য)
+        run: |
+          echo "Before:"
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo docker image prune --all --force 2>/dev/null || true
+          echo "After:"
+          df -h
+          free -h
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache llama.cpp
+        id: cache-llama
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/llama.cpp/build
+            third_party/llama.cpp/llama-quantize
+            third_party/llama.cpp/llama-cli
+          key: llama-bin-${{ hashFiles('scripts/build-llama-cpp.sh') }}-${{ inputs.llama_cpp_ref || 'master' }}-${{ runner.os }}
+
+      - name: Prepare tools (llama.cpp build)
+        if: steps.cache-llama.outputs.cache-hit != 'true'
+        env:
+          LLAMA_CPP_REF: ${{ inputs.llama_cpp_ref || 'master' }}
+        run: |
+          bash scripts/build-llama-cpp.sh
+
+      - name: Add swap if needed (7GB RAM সীমা)
+        run: |
+          if [ ! -f /swapfile ]; then
+            sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+            sudo swapon /swapfile
+          fi
+          free -h
+
+      - name: Install Python deps
+        run: |
+          pip install -U pip
+          pip install -r third_party/llama.cpp/requirements.txt 2>/dev/null || pip install gguf protobuf sentencepiece huggingface_hub safetensors
+          pip install huggingface_hub
+
+      - name: Download model from Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -e
+          MODEL_REPO="${{ matrix.repo }}"
+          MODEL_DIR="hf_model/${{ matrix.name }}"
+          mkdir -p hf_model
+
+          echo "Downloading $MODEL_REPO -> $MODEL_DIR"
+
+          # Use huggingface_hub download with or without token
+          if [ -n "$HF_TOKEN" ]; then
+            echo "Using HF_TOKEN for gated model"
+            huggingface-cli download "$MODEL_REPO" --local-dir "$MODEL_DIR" --local-dir-use-symlinks False
+          else
+            huggingface-cli download "$MODEL_REPO" --local-dir "$MODEL_DIR" --local-dir-use-symlinks False
+          fi
+
+          ls -lh "$MODEL_DIR" | head -50
+          du -sh "$MODEL_DIR"
+
+      - name: Convert to GGUF (F16)
+        run: |
+          set -e
+          MODEL_DIR="hf_model/${{ matrix.name }}"
+          OUT_DIR="out"
+          mkdir -p "$OUT_DIR"
+          BASE="${{ matrix.name }}"
+
+          echo "Converting $MODEL_DIR -> $OUT_DIR/${BASE}-f16.gguf"
+
+          python3 third_party/llama.cpp/convert_hf_to_gguf.py "$MODEL_DIR" \
+            --outfile "$OUT_DIR/${BASE}-f16.gguf" \
+            --outtype f16
+
+          ls -lh "$OUT_DIR/${BASE}-f16.gguf"
+          # Show metadata
+          python3 -c "from gguf import GGUFReader; r=GGUFReader('out/${BASE}-f16.gguf'); print(f'Arch: {[k for k in r.fields.keys()][:10]}'); print(f'Total tensors: {len(r.tensors)}')"
+
+      - name: Quantize to ${{ matrix.quant }}
+        run: |
+          set -e
+          BASE="${{ matrix.name }}"
+          QUANT="${{ matrix.quant }}"
+          OUT_DIR="out"
+
+          # If requested quant is F16, just copy
+          if [ "$QUANT" = "F16" ] || [ "$QUANT" = "f16" ]; then
+            echo "Quant is F16 — no quantization needed"
+            cp "$OUT_DIR/${BASE}-f16.gguf" "$OUT_DIR/${BASE}-${QUANT}.gguf"
+          else
+            echo "Quantizing to $QUANT"
+            ./third_party/llama.cpp/build/bin/llama-quantize \
+              "$OUT_DIR/${BASE}-f16.gguf" \
+              "$OUT_DIR/${BASE}-${QUANT}.gguf" \
+              "$QUANT"
+          fi
+
+          ls -lh "$OUT_DIR/${BASE}-${QUANT}.gguf"
+          echo "Quantized file size:"
+          du -sh "$OUT_DIR/${BASE}-${QUANT}.gguf"
+
+          # Optionally remove F16 to save space if quant != F16
+          if [ "$QUANT" != "F16" ] && [ "$QUANT" != "f16" ]; then
+            echo "Keeping F16 for reference (remove if disk tight)"
+            # Uncomment next line to save disk:
+            # rm "$OUT_DIR/${BASE}-f16.gguf"
+          fi
+
+      - name: Smoke test (3-step)
+        env:
+          TEST_PROMPT: ${{ matrix.test_prompt }}
+        run: |
+          set -e
+          BASE="${{ matrix.name }}"
+          QUANT="${{ matrix.quant }}"
+          FILE="out/${BASE}-${QUANT}.gguf"
+
+          bash scripts/smoke-test.sh "$FILE" "$TEST_PROMPT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-${{ matrix.quant }}.gguf
+          path: out/${{ matrix.name }}-${{ matrix.quant }}.gguf
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Create GitHub Release
+        if: ${{ inputs.create_release != false }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          BASE="${{ matrix.name }}"
+          QUANT="${{ matrix.quant }}"
+          FILE="out/${BASE}-${QUANT}.gguf"
+          TAG="gguf-${BASE}-${QUANT}-$(date +%Y%m%d-%H%M)"
+          # Use date-based tag; if re-running same model/quant, create new tag
+          echo "Creating release $TAG"
+
+          gh release create "$TAG" \
+            --title "${BASE} ${QUANT} — $(date +%Y-%m-%d)" \
+            --notes "Model: \`${{ matrix.repo }}\` | Quant: \`${QUANT}\` | Built from \`models.yaml\` | PocketPal AI compatible GGUF" \
+            --target "${{ github.sha }}" || echo "Release exists, uploading asset..."
+
+          gh release upload "$TAG" "$FILE" --clobber
+
+          echo "Release URL: https://github.com/${{ github.repository }}/releases/tag/$TAG"
+
+  summary:
+    needs: [prepare-matrix, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        run: |
+          echo "### GGUF Factory — Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Matrix: ${{ needs.prepare-matrix.outputs.matrix }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All jobs completed. Check Releases tab for .gguf files." >> $GITHUB_STEP_SUMMARY
+          echo "PocketPal AI: Models → + → Local file → select .gguf → Load" >> $GITHUB_STEP_SUMMARY

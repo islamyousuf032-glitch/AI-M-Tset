@@ -1,0 +1,63 @@
+# models.yaml — কোন মডেল বানাবেন তা এখানে ঠিক করুন
+# প্রতিটি ব্লক = একটি মডেল, প্রতিটি quant = আলাদা ফাইল/জব
+# PocketPal AI-তে Q4_K_M সবচেয়ে ভালো ব্যালান্স — ডিফল্ট হিসেবে এটাই রাখুন
+
+models:
+  # ───────────────────────────────────────────────────────
+  # ✅ ACTIVE — ডিফল্ট (Balanced): সব ফোনে চলবে, বাংলা ভালো
+  # ───────────────────────────────────────────────────────
+  - name: Qwen3-1.7B
+    repo: Qwen/Qwen3-1.7B
+    quants: [Q4_K_M]          # PocketPal-এর জন্য বেস্ট; চাইলে [Q4_K_M, Q8_0] দিন
+    test_prompt: "হ্যালো, কেমন আছো?"
+
+  # ───────────────────────────────────────────────────────
+  # 🔹 Ultra-Light — সবচেয়ে ছোট, টেস্ট/পুরোনো ফোনের জন্য
+  # ───────────────────────────────────────────────────────
+  # - name: Qwen3-0.6B
+  #   repo: Qwen/Qwen3-0.6B
+  #   quants: [Q4_K_M, Q8_0]
+  #   test_prompt: "The capital of France is"
+
+  # ───────────────────────────────────────────────────────
+  # 🔹 Powerful — 6GB+ RAM ফোনে বেস্ট কোয়ালিটি
+  # ───────────────────────────────────────────────────────
+  # - name: Qwen3-4B
+  #   repo: Qwen/Qwen3-4B
+  #   quants: [Q4_K_M]
+  #   test_prompt: "Explain quantum computing in simple terms:"
+
+  # ───────────────────────────────────────────────────────
+  # 🔹 Gemma 3 1B — Google, gated (HF_TOKEN লাগবে)
+  # ───────────────────────────────────────────────────────
+  # - name: Gemma-3-1B-it
+  #   repo: google/gemma-3-1b-it
+  #   quants: [Q4_K_M]
+  #   test_prompt: "হ্যালো"
+
+  # ───────────────────────────────────────────────────────
+  # 🔹 Llama 3.2 1B — Meta, gated (HF_TOKEN লাগবে)
+  # ───────────────────────────────────────────────────────
+  # - name: Llama-3.2-1B-Instruct
+  #   repo: meta-llama/Llama-3.2-1B-Instruct
+  #   quants: [Q4_K_M]
+  #   test_prompt: "Hello"
+
+  # ───────────────────────────────────────────────────────
+  # ⚠️ "Uncensored-style" কমিউনিটি মডেল — ব্যবহারের আগে পড়ুন
+  # ───────────────────────────────────────────────────────
+  # নিচের মডেলগুলো কমিউনিটি ফাইন-টিউন — টোন বেশি খোলামেলা,
+  # কিন্তু "Uncensored" মানেই নিরাপত্তা তুলে দেওয়া নয়।
+  # PocketPal-এ System Prompt দিয়ে আচরণ নিয়ন্ত্রণ করুন,
+  # অবৈধ/ক্ষতিকর কাজে ব্যবহার করবেন না — এটা আইন ও HF ToS-এর বিরুদ্ধে।
+  # প্রস্তাব: প্রথমে Qwen দিয়ে পাইপলাইন টেস্ট করুন, পরে এগুলো ট্রাই করুন।
+  #
+  # - name: Dolphin-Mistral-7B
+  #   repo: cognitivecomputations/dolphin-2.9.2-mistral-7b
+  #   quants: [Q4_K_M]
+  #   test_prompt: "Write a short story about a robot:"
+  #
+  # - name: OpenHermes-2.5-Mistral-7B
+  #   repo: teknium/OpenHermes-2.5-Mistral-7B
+  #   quants: [Q4_K_M]
+  #   test_prompt: "Explain in Bangla: What is AI?"

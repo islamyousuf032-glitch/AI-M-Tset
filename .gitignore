@@ -1,0 +1,20 @@
+# GGUF artifacts — huge, never commit
+*.gguf
+*.bin
+out/
+hf_model/
+third_party/
+models/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+# OS
+.DS_Store
+Thumbs.db
+# Logs
+*.log
+fail.log
+# Swap
+/swapfile
